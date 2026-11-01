@@ -21,6 +21,18 @@ go install github.com/chr33s/shelp/cmd/shelp@latest
 
 Keep Go's binary installation directory on `PATH`.
 
+### From GitHub releases
+
+Download the archive for your OS and architecture from
+[Releases](https://github.com/chr33s/shelp/releases). Archives are available for
+macOS and Linux on arm64 and amd64. Verify the download against `SHA256SUMS`,
+extract it, and copy `shelp` to a directory on `PATH` such as `~/.local/bin`.
+Shell integration is embedded in the binary.
+
+macOS release binaries are Developer ID signed and notarized. Gatekeeper needs
+an online check because notarization tickets cannot be stapled to standalone
+executables.
+
 ### From source
 
 Run these commands from the repository directory:
@@ -199,6 +211,32 @@ and invalidated when the index changes. `--nl-ttl 0` bypasses caching;
 the intended task, and shelp never executes them.
 
 ## Development and verification
+
+`mise install` installs the pinned development tools. Run `mise run verify` for
+tests and vet, or `mise run release` to build all four release archives and
+`dist/SHA256SUMS` locally. Local release builds are unsigned by default.
+
+GitHub Actions verifies pushes and pull requests on Linux and macOS. After both
+pass, pushes to `main` publish a `main-<full commit SHA>` release. Assets upload
+to a draft before publication; reruns resume drafts and leave published releases
+unchanged.
+
+The release job requires these repository or organization secrets, matching
+the `shistory` signing setup:
+
+- `DEVELOPER_ID_CERTIFICATE_BASE64`: base64-encoded PKCS#12 certificate and private key.
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`: PKCS#12 password.
+- `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`: notarization credentials.
+
+CI selects the valid Developer ID Application identity in the imported PKCS#12
+whose team matches `APPLE_TEAM_ID`, then signs by its SHA-1 fingerprint. Missing
+or ambiguous matches fail the release. The signing script also accepts an optional
+`DEVELOPER_ID_APPLICATION` environment variable (fingerprint, full name, or name
+substring) to narrow the selection when running it manually; CI does not use
+that secret.
+
+Publishing uses the workflow's `GITHUB_TOKEN` with `contents: write`. Missing
+signing secrets fail the release job before publication.
 
 ```sh
 go test ./...

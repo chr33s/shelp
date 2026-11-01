@@ -1,0 +1,24 @@
+[tools]
+go = "1.26.5"
+python = "3.14.7"
+gh = "2.97.0"
+
+[env]
+CGO_ENABLED = "0"
+GOTOOLCHAIN = "local"
+GOCACHE = "{{config_root}}/.cache/go-build"
+
+[tasks.build]
+run = "go build -trimpath -o bin/shelp ./cmd/shelp"
+
+[tasks.test]
+run = "go test ./..."
+
+[tasks.check]
+run = "go vet ./..."
+
+[tasks.verify]
+depends = ["test", "check"]
+
+[tasks.release]
+run = "bash scripts/build-release.sh"
