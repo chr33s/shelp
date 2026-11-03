@@ -76,16 +76,26 @@ func newRoot() *cobra.Command {
 	search.Flags().BoolVar(&jsonOutput, "json", false, "Print structured results")
 	root.Flags().IntVarP(&limit, "limit", "n", 10, "Maximum search results (1–1000)")
 	root.Flags().BoolVar(&jsonOutput, "json", false, "Print structured search results")
-	var fm string
+	var fm, backend, model, ollamaHost string
 	var nlTimeout, ttl time.Duration
+	defaultHost := os.Getenv("SHELP_OLLAMA_HOST")
+	if defaultHost == "" {
+		defaultHost = os.Getenv("OLLAMA_HOST")
+	}
+	backendUsage := "AI backend: fm (macOS 27 on-device, default on macOS) or ollama (local server)"
+	modelUsage := "Ollama model for --nl-backend ollama, e.g. llama3.2"
+	hostUsage := "Ollama address; loopback only (default http://127.0.0.1:11434)"
 	// Hidden inherited flags preserve existing invocations, including ? queries.
 	root.PersistentFlags().StringVar(&fm, "fm", "fm", "Foundation Models executable")
 	root.PersistentFlags().DurationVar(&nlTimeout, "nl-timeout", 30*time.Second, "On-device suggestion timeout")
 	root.PersistentFlags().DurationVar(&ttl, "nl-ttl", 15*time.Minute, "Natural-language cache TTL (0 disables caching)")
+	root.PersistentFlags().StringVar(&backend, "nl-backend", os.Getenv("SHELP_NL_BACKEND"), backendUsage)
+	root.PersistentFlags().StringVar(&model, "nl-model", os.Getenv("SHELP_NL_MODEL"), modelUsage)
+	root.PersistentFlags().StringVar(&ollamaHost, "ollama-host", defaultHost, hostUsage)
 	suggest := func(cmd *cobra.Command, query string) ([]string, error) {
-		return nl.Suggest(cmd.Context(), query, nl.Options{DBPath: dbPath, Executable: fm, Timeout: nlTimeout, TTL: ttl})
+		return nl.Suggest(cmd.Context(), query, nl.Options{DBPath: dbPath, Executable: fm, Backend: backend, Model: model, OllamaHost: ollamaHost, Timeout: nlTimeout, TTL: ttl})
 	}
-	natural := &cobra.Command{Use: "nl <natural language>", Short: "Suggest commands using on-device fm; never execute them", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	natural := &cobra.Command{Use: "nl <natural language>", Short: "Suggest commands using an on-device model (fm or local Ollama); never execute them", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		lines, err := suggest(cmd, strings.Join(args, " "))
 		if err != nil {
 			return err
@@ -93,12 +103,15 @@ func newRoot() *cobra.Command {
 		return printLines(cmd.OutOrStdout(), lines)
 	}}
 	// Advanced settings belong in nl help, but remain accepted before commands.
-	for _, name := range []string{"fm", "nl-timeout", "nl-ttl"} {
+	for _, name := range []string{"fm", "nl-timeout", "nl-ttl", "nl-backend", "nl-model", "ollama-host"} {
 		_ = root.PersistentFlags().MarkHidden(name)
 	}
 	natural.Flags().StringVar(&fm, "fm", "fm", "Foundation Models executable")
 	natural.Flags().DurationVar(&nlTimeout, "nl-timeout", 30*time.Second, "On-device suggestion timeout")
 	natural.Flags().DurationVar(&ttl, "nl-ttl", 15*time.Minute, "Suggestion cache TTL (0 disables caching)")
+	natural.Flags().StringVar(&backend, "nl-backend", os.Getenv("SHELP_NL_BACKEND"), backendUsage)
+	natural.Flags().StringVar(&model, "nl-model", os.Getenv("SHELP_NL_MODEL"), modelUsage)
+	natural.Flags().StringVar(&ollamaHost, "ollama-host", defaultHost, hostUsage)
 	root.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return cmd.Help()

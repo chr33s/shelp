@@ -29,7 +29,7 @@ func TestSuggestionsContractCacheAndInvalidation(t *testing.T) {
 	if err := os.WriteFile(fm, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
-	opts := Options{DBPath: path, Executable: fm, Timeout: time.Second, TTL: time.Minute}
+	opts := Options{DBPath: path, Executable: fm, Backend: "fm", Timeout: time.Second, TTL: time.Minute}
 	got, err := Suggest(ctx, "?find large files", opts)
 	if err != nil || len(got) != 1 || got[0] != "find . -type f -size +100M" {
 		t.Fatalf("suggest: %v %v", got, err)

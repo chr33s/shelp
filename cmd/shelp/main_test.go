@@ -96,13 +96,13 @@ func TestExplicitAIAndDefaultSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"?show git history"}, {"nl", "show git history"}, {"complete", "?show git history"}} {
-		out, err := run(append([]string{"--db", db, "--fm", fm, "--nl-ttl", "0"}, args...)...)
+		out, err := run(append([]string{"--db", db, "--nl-backend", "fm", "--fm", fm, "--nl-ttl", "0"}, args...)...)
 		if err != nil || out != "git log --oneline\n" {
 			t.Fatalf("explicit AI %v: %q %v", args, out, err)
 		}
 	}
 	// Advanced flags work after the explicit command as well as before it.
-	if out, err := run("--db", db, "nl", "--fm", fm, "--nl-ttl", "0", "show git history"); err != nil || out != "git log --oneline\n" {
+	if out, err := run("--db", db, "nl", "--nl-backend", "fm", "--fm", fm, "--nl-ttl", "0", "show git history"); err != nil || out != "git log --oneline\n" {
 		t.Fatal(out, err)
 	}
 }

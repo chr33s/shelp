@@ -215,8 +215,8 @@ system and asks for one to three command lines with correct synopsis ordering
 and the current directory as the default search location.
 
 Invoke it explicitly with `shelp "?find large files"` or
-`shelp nl "find large files"`. Advanced `--fm`, `--nl-timeout`, and `--nl-ttl`
-flags appear in `nl --help`. Existing invocations with those flags before a
+`shelp nl "find large files"`. Advanced `--fm`, `--nl-backend`, `--nl-model`,
+`--ollama-host`, `--nl-timeout`, and `--nl-ttl` flags appear in `nl --help`. Existing invocations with those flags before a
 command, or alongside a `?` query, remain supported.
 
 This requires a supported Mac with the on-device model available and Apple's
@@ -230,6 +230,29 @@ fm models
 shelp does not accept legal terms or switch to a cloud model. Missing models,
 license errors, and timeouts are reported. Ordinary search and completion work
 without `fm`; use `--fm /path/to/fm` to select another executable explicitly.
+
+### Linux and other systems: local Ollama
+
+`fm` exists only on macOS 27, so elsewhere `?` queries need a local
+[Ollama](https://ollama.com) model. Without one, shelp explains the setup
+instead of failing obscurely; offline search is unaffected.
+
+```sh
+ollama pull llama3.2
+export SHELP_NL_BACKEND=ollama SHELP_NL_MODEL=llama3.2
+shelp "?find large files"
+# or per invocation:
+shelp nl --nl-backend ollama --nl-model llama3.2 'find large files'
+```
+
+The same backend works on macOS. shelp sends the same instructions and help
+excerpts as with `fm`, at temperature 0, to `/api/chat`. It connects to
+`http://127.0.0.1:11434` by default; `--ollama-host` or `SHELP_OLLAMA_HOST`
+(falling back to `OLLAMA_HOST`) changes the address, and a bind address such as
+`0.0.0.0` means this machine. Only loopback addresses are accepted, so help
+excerpts, which may contain local paths, never leave the machine, and HTTP
+proxies are not used. One surrounding code fence in a reply is removed; the
+lines inside are validated as for `fm`.
 
 Recent NL results are cached in SQLite for 15 minutes, bounded to 100 entries
 and invalidated when the index changes. `--nl-ttl 0` bypasses caching;

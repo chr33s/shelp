@@ -9,7 +9,7 @@ Go CLI + thin shell glue that indexes installed binaries and their `--help`/man 
 - Scan `$PATH`, capture help text, and store it locally (SQLite).
 - Embeddings for semantic search over help.
 - Fast completion (prefix/fuzzy + vector).
-- Optional NL mode using on-device `fm`.
+- Optional NL mode using on-device `fm` (macOS 27), or a local Ollama model on any platform.
 - Single binary; minimal shell scripts for zsh/bash.
 
 ## Architecture
@@ -108,7 +108,7 @@ shelp status
 
 - No arguments shows help with everyday examples and commands.
 - `--limit` and `--json` apply to default and explicit search.
-- Advanced `--fm`, `--nl-timeout`, and `--nl-ttl` settings appear in `nl --help`, not root help. Existing invocations with these flags before a command remain compatible, and `?` queries can use them.
+- Advanced `--fm`, `--nl-backend`, `--nl-model`, `--ollama-host`, `--nl-timeout`, and `--nl-ttl` settings appear in `nl --help`, not root help. Existing invocations with these flags before a command remain compatible, and `?` queries can use them.
 - Named subcommands take precedence over bare search. Use `shelp search <query>` to search a command name that collides with a subcommand.
 - Missing-index errors include a copyable `Run: shelp index` instruction, preserving an explicit database override when needed.
 
@@ -123,7 +123,8 @@ shelp status
 - Go 1.22+.
 - `modernc.org/sqlite` (pure Go).
 - `gonum.org/v1/gonum` for local embedding training.
-- `fm` present for the NL path (macOS 27+).
+- NL path: `fm` (macOS 27+), or a local Ollama server and model selected with `--nl-backend ollama --nl-model <model>` (env `SHELP_NL_BACKEND`, `SHELP_NL_MODEL`, `SHELP_OLLAMA_HOST`/`OLLAMA_HOST`).
+- Backend default: `fm` on macOS. Elsewhere, with no backend configured, `?` queries fail with setup instructions; a missing `fm` names `--fm` and the Ollama alternative. Ollama addresses must be loopback (an unspecified bind address maps to 127.0.0.1), requests bypass proxies, use temperature 0 and the same instructions and excerpts as `fm`; one surrounding code fence is stripped before the same output validation. The cache key includes backend, host and model.
 
 ## Success Criteria
 
