@@ -103,31 +103,57 @@ New, changed, and removed counts describe differences from the replaced index.
 An unchanged run skips training and saving; `--full` rebuilds even when there
 are no content changes, without counting unchanged tools as changed.
 
-Indexing runs executables with `--help`, `-h`, or `help`, then tries `man -P cat`
-if needed. Use a trusted PATH or limit the scan with `--path`. Each run indexes
+Indexing reads `man -P cat` first and only runs an executable, with `--help`
+or `-h`, when it has no man page. Probes get `/dev/null` as stdin and run in a
+throwaway working directory. Commands in `sbin` directories and known
+side-effecting tools (`wall`, `mail`, `shutdown`, `say`, `open`, `osascript`, …)
+are never executed. On macOS, developer-tool shims in `/usr/bin` (such as
+`pagestuff`) run only when `xcrun --find` locates their real tool, and none run
+when no developer directory is selected, so indexing never opens the "install
+command line developer tools" dialog. Use a trusted PATH or limit the scan with
+`--path`. Each run indexes
 its selected path-list as a complete collection; tools outside that collection
 are removed from the previous index.
 
 ### Ranking and matching
 
-Search combines exact/prefix command names, substring/subsequence matching,
-typo tolerance, FTS5 keywords, and embedding cosine similarity. Name matches
-have the strongest weight; equal scores are ordered by command name. Search
-and completion return up to 10 results by default; `--limit N` accepts 1–1,000.
+Search combines command names, FTS5 keywords, and embedding cosine similarity.
+Name matches have the strongest weight: an exact name always ranks first, and
+shorter prefix matches beat longer ones (`gi` finds `git` before
+`git-upload-pack`). Substrings, subsequences and typos also match names. In a
+multi-word query, a word that names a command (`find` in "find large files")
+counts as a name match.
+
+Keyword search uses Porter stemming ("files" matches "file"; "search" also
+matches "searcher"). It ranks help that covers more query words first, and
+for multi-word queries it boosts commands whose one-line summary (the man
+`NAME` line, or the first descriptive line of `--help`) matches. Man page
+headers, section headings, `Usage:` labels and help boilerplate such as
+"options" are not indexed as content. Commands sharing one help text appear
+once under their canonical name (`grep`, not `bzegrep`), and versioned installs
+such as `pg_dump-18` group with `pg_dump`. Typing an alias's name still shows
+that alias. shelp does not index itself. Equal scores are ordered by command
+name. Search and completion return up to 10 results by default; `--limit N`
+accepts 1–1,000.
 
 Embeddings use a local TF-IDF + latent semantic analysis (LSA) model implemented
 in Go with Gonum. It learns up to 64 dimensions from up to 4,096 terms in the
-installed help corpus. It learns relationships present in that corpus rather
-than a pretrained language model's broad synonym knowledge. Unknown vocabulary
+installed help corpus. Each command's summary is weighted above its option list. It learns
+relationships present in that corpus rather than a pretrained language model's
+broad synonym knowledge, so intents phrased in words no installed help uses
+("synchronize" for rsync's "file-copying") may still miss. Unknown vocabulary
 falls back to lexical search. No weights are downloaded or network requests
 made for indexing and search.
 
 ### Output formats
 
-`shelp <query>` and `search` print command names and short help snippets
-separated by a tab.
-`search --json` returns names, executable paths, scores, and help excerpts of up
-to 1,200 characters. `complete` prints shell-quoted command names, or complete
+`shelp <query>` and `search` print each command name with its one-line summary
+(the man page `NAME` description, or the first descriptive line of `--help`),
+falling back to a short help snippet when there is none. On a terminal, names
+are aligned in a column; piped output separates name and description with a
+tab.
+`search --json` returns names, executable paths, scores, summaries, and help
+excerpts of up to 1,200 characters. `complete` prints shell-quoted command names, or complete
 command lines for natural-language input, one per line.
 
 `complete` accepts a token or a buffer. A leading `?` explicitly selects

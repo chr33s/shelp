@@ -12,6 +12,7 @@ import (
 )
 
 func TestSuggestionsContractCacheAndInvalidation(t *testing.T) {
+	t.Setenv("MANPATH", t.TempDir()) // fake commands must not resolve to system man pages
 	ctx := context.Background()
 	dir := t.TempDir()
 	path := filepath.Join(t.TempDir(), "index.db")

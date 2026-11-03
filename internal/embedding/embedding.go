@@ -27,24 +27,57 @@ type Model map[string]Term
 
 var stopWords = func() map[string]bool {
 	m := map[string]bool{}
-	for _, s := range strings.Fields("a an and are as at be been but by can do for from had has have if in into is it its may not of on or our out per so than that the their then there these they this those to use used using was we were when where which who will with you your") {
+	// English function words, then words that appear in nearly every help text
+	// or man page without saying what a command does.
+	for _, s := range strings.Fields("a an and are as at be been but by can do for from had has have if in into is it its may not of on or our out per so than that the their then there these they this those to use used using was we were when where which who will with you your " +
+		"also any argument arguments default defaults flag flags help option options optional see specified specify synopsis version") {
 		m[s] = true
 	}
 	return m
 }()
 
+// StopWord reports words too common in help text to discriminate commands.
+func StopWord(word string) bool { return stopWords[strings.ToLower(word)] }
+
+// Tokens counts Porter-stemmed words, matching the keyword index's tokenizer.
 func Tokens(text string) map[string]float64 {
 	counts := map[string]float64{}
 	for _, word := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) }) {
 		if len(word) < 2 || len(word) > 64 || stopWords[word] {
 			continue
 		}
-		if len(word) > 4 && strings.HasSuffix(word, "s") && !strings.HasSuffix(word, "ss") {
-			word = strings.TrimSuffix(word, "s")
-		}
-		counts[word]++
+		counts[Stem(word)]++
 	}
 	return counts
+}
+
+// Variants lists lookup candidates for a stemmed token: the token itself, then
+// the agent noun's base ("searcher" -> "search"), which Porter keeps distinct.
+func Variants(token string) []string {
+	if len(token) > 5 && strings.HasSuffix(token, "er") {
+		return []string{token, token[:len(token)-2]}
+	}
+	return []string{token}
+}
+
+// fold merges agent nouns into their base when the corpus contains the base,
+// so "file pattern searcher" relates to "search" without conflating "filter"
+// with an unseen "filt".
+func fold(counts []map[string]float64) {
+	seen := map[string]bool{}
+	for _, c := range counts {
+		for word := range c {
+			seen[word] = true
+		}
+	}
+	for _, c := range counts {
+		for word, n := range c {
+			if v := Variants(word); len(v) > 1 && seen[v[1]] {
+				c[v[1]] += n
+				delete(c, word)
+			}
+		}
+	}
 }
 
 // Train uses randomized truncated SVD, with a fixed seed for repeatable output.
@@ -57,7 +90,10 @@ func Train(ctx context.Context, texts []string) (Model, [][]float64, error) {
 			return nil, nil, err
 		}
 		counts[i] = Tokens(text)
-		for word := range counts[i] {
+	}
+	fold(counts)
+	for _, c := range counts {
+		for word := range c {
 			df[word]++
 		}
 	}
@@ -231,7 +267,13 @@ func (m Model) Embed(text string) []float64 {
 	sort.Strings(words)
 	var result []float64
 	for _, word := range words {
-		term, ok := m[word]
+		var term Term
+		ok := false
+		for _, v := range Variants(word) {
+			if term, ok = m[v]; ok {
+				break
+			}
+		}
 		if !ok {
 			continue
 		}

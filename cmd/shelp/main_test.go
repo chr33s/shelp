@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chr33s/shelp/internal/index"
 )
 
 func run(args ...string) (string, error) {
@@ -13,6 +15,7 @@ func run(args ...string) (string, error) {
 	return out, err
 }
 func TestCLI(t *testing.T) {
+	t.Setenv("MANPATH", t.TempDir()) // fake commands must not resolve to system man pages
 	dir := t.TempDir()
 	db := filepath.Join(t.TempDir(), "index.db")
 	for name, help := range map[string]string{"git": "Usage: git commit history", "find": "Usage: find files size"} {
@@ -179,5 +182,20 @@ func TestIndexProgressAndSummary(t *testing.T) {
 	out, _, err = runStreams(args...)
 	if err != nil || !strings.Contains(out, "1 without help") {
 		t.Fatal(out, err)
+	}
+}
+
+func TestResultFormatting(t *testing.T) {
+	results := []index.Result{
+		{Name: "find", Summary: "walk a file hierarchy", Help: "FIND(1) General Commands Manual FIND(1) NAME find – walk a file hierarchy"},
+		{Name: "lwp-download", Help: "Usage: lwp-download [-a] <url>"},
+	}
+	var out bytes.Buffer
+	if err := printResults(&out, results); err != nil {
+		t.Fatal(err)
+	}
+	// Pipes get the documented tab format; man summaries replace page headers.
+	if want := "find\twalk a file hierarchy\nlwp-download\tUsage: lwp-download [-a] <url>\n"; out.String() != want {
+		t.Fatalf("got %q, want %q", out.String(), want)
 	}
 }

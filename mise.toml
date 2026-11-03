@@ -22,3 +22,7 @@ depends = ["test", "check"]
 
 [tasks.release]
 run = "bash scripts/build-release.sh"
+
+[tasks.install]
+depends = ["build"]
+run = "cp bin/shelp ~/.local/bin"

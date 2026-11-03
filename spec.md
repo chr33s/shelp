@@ -28,18 +28,19 @@ Shell plugins only register completers that call `shelp complete`.
 
 ## Data Model (SQLite)
 
-- `commands`: `name TEXT PK`, `path TEXT`, `help TEXT`, `help_hash TEXT`, `updated INTEGER`.
+- `commands`: `name TEXT PK`, `path TEXT`, `help TEXT`, `help_hash TEXT`, `updated INTEGER`, `summary TEXT` (man `NAME` line or first descriptive `--help` line), `body TEXT` (help without page headers/footers, section headings and `Usage:` labels), `grp TEXT` (canonical name of commands sharing identical help, or of a versioned install's base command).
+- `meta`: `key TEXT PK`, `value TEXT`; `model` records the embedding model version, and a mismatch forces retraining.
 - `embeddings`: `name TEXT PK`, `vector BLOB` (little-endian float32 array, up to 64 dimensions).
-- FTS5 virtual table on names/help for keyword matching.
+- FTS5 virtual table on `name`, `summary`, `body` (bm25 weights 5, 4, 1) with `porter unicode61` stemming. Schema version 3; older indexes are migrated on the next `shelp index` or search.
 - `terms`: term vocabulary, IDF weights, and float32 projection vectors for query embeddings.
 - `nl_cache`: prompt keys, cached suggestion lines, and expiration timestamps.
 
 ## Indexing
 
-1. Walk `$PATH`, keeping executable files (skip directories and obvious non-CLIs).
-2. Run `bin --help` / `-h` / `help` sharing a 2-second timeout; fall back to `man -P cat` with a separate 2-second timeout.
+1. Walk `$PATH`, keeping executable files (skip directories and obvious non-CLIs). Skip shelp itself (by name and by the running executable's resolved path); its help quotes example queries.
+2. Read `man -P cat` first (2-second timeout); a command with a man page is never executed. Otherwise run `bin --help`, and `bin -h` only when the `--help` output advertises `-h`, sharing a separate 2-second timeout. Probes get stdin `/dev/null`; the working directory, `HOME`, `TMPDIR` and XDG base directories point into a throwaway sandbox under one per-run root that is removed when indexing ends. Never pass a bare positional word. Never execute commands in `sbin` directories, on the side-effect denylist (broadcast, mail, power, firmware, audio, GUI, daemon tools such as `wall`, `mail`, `shutdown`, `say`, `open`, `osascript`, including versioned names like `perlbug5.34`), matching installer/updater/diagnose/flash/server/`.sh`/`.d` name patterns, or DTrace scripts, including via symlinks; they rely on man pages alone. On macOS, a `/usr/bin` developer-tool shim (links `libxcselect.dylib`; not `xcrun`/`xcode-select`) runs only if `xcode-select -p` names an existing directory and `xcrun --find <name>` succeeds; otherwise running it would open the developer-tools install dialog.
 3. Limit captured help to 12 KiB, remove terminal escapes/overstrikes, and hash with SHA-256. Retain unchanged records and skip training when the corpus is unchanged.
-4. Generate an embedding of the name plus the bounded help text. Corpus changes retrain the shared model and refresh command vectors.
+4. Generate an embedding of the name, the summary (repeated three times), and the body. Tokens are Porter-stemmed, help boilerplate words are stop words, and agent nouns fold into their base when the corpus has it ("searcher" → "search"). Corpus or model-version changes retrain the shared model and refresh command vectors. Look up man page names once from `manpath` and only run `man` for commands that have a page.
 5. Upsert into SQLite.
 6. Run in parallel (goroutines + semaphore). Incremental by default; provide a full rebuild flag.
 7. Report scanning, help-capture counts, training, and saving progress on stderr.
@@ -56,10 +57,12 @@ Shell plugins only register completers that call `shelp complete`.
 
 - Input: current token / buffer.
 - Hybrid score:
-  - Exact/prefix name match (high weight).
-  - FTS keyword on help.
+  - Name match: exact (dominant), prefix scaled by query/name length, substring, subsequence, typo. In multi-word queries, a word equal to the command name scores as a name match, and a prefix covering most of the name scores lower.
+  - FTS keyword over name/summary/body, ranking help that covers more query words first, then bm25; query words also match their "-er" form; stop words are skipped. Multi-word queries add a bonus for summary matches.
   - Cosine similarity on embeddings.
+- Collapse commands in one `grp` to a single result at the group's best score, shown under the canonical name unless an alias matched by name.
 - Return the top N names + short help snippet.
+- Relevance is tracked by a fixture suite and an opt-in check against an installed index (`SHELP_EVAL_DB=… go test ./internal/index -run RealIndex -v`).
 - `shelp complete --shell zsh <query>` outputs lines for `compadd`.
 
 ## Natural Language

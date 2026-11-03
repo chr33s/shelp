@@ -20,6 +20,7 @@ func executable(t testing.TB, dir, name, body string) string {
 	return p
 }
 func TestIndexLifecycle(t *testing.T) {
+	t.Setenv("MANPATH", t.TempDir()) // fake commands must not resolve to system man pages
 	ctx := context.Background()
 	first, second := t.TempDir(), t.TempDir()
 	dbPath := filepath.Join(t.TempDir(), "index.db")
@@ -100,9 +101,9 @@ func TestIndexLifecycle(t *testing.T) {
 }
 func TestHelpFallbackAndBounds(t *testing.T) {
 	dir := t.TempDir()
-	executable(t, dir, "man", `printf 'manual for %s\n' "$4"`)
+	executable(t, dir, "man", `case "$4" in listing|manual|documented) printf 'manual for %s\n' "$4";; *) exit 1;; esac`)
 	t.Setenv("PATH", dir)
-	flag := executable(t, dir, "flags", `if [ "$1" = -h ]; then echo 'Usage: flags alternate'; else exit 1; fi`)
+	flag := executable(t, dir, "flags", `if [ "$1" = -h ]; then echo 'Usage: flags alternate'; else echo 'unknown option, try -h' >&2; exit 1; fi`)
 	if got := captureHelp(context.Background(), flag, time.Second); got != "Usage: flags alternate" {
 		t.Fatal(got)
 	}
@@ -124,6 +125,89 @@ func TestHelpFallbackAndBounds(t *testing.T) {
 		t.Fatalf("clean: %q", got)
 	}
 }
+
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestHelpProbeSafety(t *testing.T) {
+	dir, marks := t.TempDir(), t.TempDir()
+	executable(t, dir, "man", `case "$4" in documented) echo 'manual for documented';; *) exit 1;; esac`)
+	t.Setenv("PATH", dir)
+	ctx := context.Background()
+	ran := func(name string) bool {
+		_, err := os.Stat(filepath.Join(marks, name))
+		return err == nil
+	}
+	// Commands with a man page are never executed.
+	documented := executable(t, dir, "documented", "touch "+marks+"/documented; echo 'Usage: ran'")
+	if got := captureHelp(ctx, documented, time.Second); got != "manual for documented" || ran("documented") {
+		t.Fatalf("man page not preferred: %q ran=%v", got, ran("documented"))
+	}
+	// Denylisted names and sbin directories are never executed.
+	wall := executable(t, dir, "wall", "touch "+marks+"/wall; echo 'Usage: wall'")
+	sbin := filepath.Join(t.TempDir(), "sbin")
+	if err := os.Mkdir(sbin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	admin := executable(t, sbin, "admin", "touch "+marks+"/admin; echo 'Usage: admin'")
+	alias := filepath.Join(dir, "alias")
+	if err := os.Symlink(wall, alias); err != nil {
+		t.Fatal(err)
+	}
+	unsafe := []string{wall, admin, alias}
+	for _, name := range []string{"perlbug5.34", "install-tool", "update_firmware", "usbdiagnose", "dev-server", "release.sh", "probe.d"} {
+		unsafe = append(unsafe, executable(t, dir, name, "touch "+marks+"/unsafe; echo 'Usage: unsafe'"))
+	}
+	dtrace := filepath.Join(dir, "walker")
+	if err := os.WriteFile(dtrace, []byte("#!/usr/sbin/dtrace -s\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	unsafe = append(unsafe, dtrace)
+	for _, bin := range unsafe {
+		if got := captureHelp(ctx, bin, time.Second); got != "" {
+			t.Fatalf("%s probed: %q", bin, got)
+		}
+	}
+	if ran("wall") || ran("admin") || ran("unsafe") {
+		t.Fatal("unsafe command executed")
+	}
+	// -h runs only when --help advertises it.
+	silent := executable(t, dir, "silent", `[ "$1" = -h ] && touch `+marks+`/h; exit 1`)
+	if got := captureHelp(ctx, silent, time.Second); got != "" || ran("h") {
+		t.Fatalf("unadvertised -h probed: %q ran=%v", got, ran("h"))
+	}
+	// Probes run in a throwaway directory, HOME and XDG dirs with empty stdin,
+	// and never pass a bare word.
+	home, tmp := t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", tmp) // private, so other packages' concurrent probes don't show up below
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cwd, prev := t.TempDir(), mustGetwd(t)
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	writer := executable(t, dir, "writer", `touch stray "$HOME/.dotfile" "$TMPDIR/tmpfile"; mkdir -p "$XDG_CONFIG_HOME"; touch "$XDG_CONFIG_HOME/conf"; [ "$1" = help ] && touch `+marks+`/help; read line && touch `+marks+`/stdin; exit 1`)
+	captureHelp(ctx, writer, time.Second)
+	for _, d := range []string{cwd, home} {
+		if entries, _ := os.ReadDir(d); len(entries) != 0 {
+			t.Fatalf("probe wrote to %s: %v", d, entries)
+		}
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(tmp, "shelp-probe-*")); len(leftovers) != 0 {
+		t.Fatalf("sandbox not removed: %v", leftovers)
+	}
+	if ran("help") || ran("stdin") {
+		t.Fatalf("help=%v stdin=%v", ran("help"), ran("stdin"))
+	}
+}
+
 func TestCancelledBuildPreservesSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(t.TempDir(), "index.db")
@@ -164,6 +248,41 @@ func TestLegacyMigration(t *testing.T) {
 	var count int
 	if err = db.QueryRow(`SELECT count(*) FROM commands_fts WHERE commands_fts MATCH 'keyword'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("migration: %d %v", count, err)
+	}
+	// Version 2 stems: "keywords" matches "keyword".
+	if err = db.QueryRow(`SELECT count(*) FROM commands_fts WHERE commands_fts MATCH 'keywords'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("stemming: %d %v", count, err)
+	}
+	var version int
+	if err = db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("version: %d %v", version, err)
+	}
+}
+
+func TestMultiWordQueryPrefersNamedCommand(t *testing.T) {
+	t.Setenv("MANPATH", t.TempDir())
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "index.db")
+	// Mirrors the real failure: shelp's help quotes the query verbatim and
+	// short help texts mention "large files"/"large objects".
+	executable(t, dir, "shelp", `echo 'Usage: shelp "find large files"  # semantic search'`)
+	executable(t, dir, "find", `echo 'Usage: find walk a file hierarchy and evaluate an expression for each file'`)
+	executable(t, dir, "findrule", `echo 'Usage: findrule command line wrapper to File::Find::Rule'`)
+	executable(t, dir, "git-lfs", `echo 'Usage: git lfs managing and versioning large files'`)
+	executable(t, dir, "vacuumlo", `echo 'Usage: vacuumlo removes unreferenced large objects'`)
+	executable(t, dir, "sdiff", `echo 'Usage: sdiff side-by-side merge of file differences'`)
+	if _, err := Build(ctx, Options{DBPath: dbPath, PATH: dir, Workers: 2, Timeout: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	results, err := Search(ctx, dbPath, "find large files", 10)
+	if err != nil || len(results) == 0 || results[0].Name != "find" {
+		t.Fatalf("find large files: %+v %v", results, err)
+	}
+	for _, r := range results {
+		if r.Name == "shelp" {
+			t.Fatal("shelp indexed itself")
+		}
 	}
 }
 func TestQueryAndInputErrors(t *testing.T) {
@@ -292,5 +411,35 @@ func TestOverlappingBuildsPublishConsistentSnapshot(t *testing.T) {
 				t.Fatalf("FTS retains other snapshot: %d %v", count, err)
 			}
 		})
+	}
+}
+
+func TestXcodeShimsWithoutToolAreNotRun(t *testing.T) {
+	dir, marks := t.TempDir(), t.TempDir()
+	executable(t, dir, "man", "exit 1")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	shims := t.TempDir()
+	prevDirs, prevTool := shimDirs, developerTool
+	t.Cleanup(func() { shimDirs, developerTool = prevDirs, prevTool })
+	shimDirs = []string{shims}
+	developerTool = func(name string) bool { return name == "present" }
+	// Real shims are Mach-O files linking libxcselect.dylib; the marker string
+	// is what detection looks for.
+	shim := func(name string) string {
+		return executable(t, shims, name, "# links /usr/lib/libxcselect.dylib\ntouch "+marks+"/"+name+"; echo 'Usage: "+name+" [options]'")
+	}
+	if got := captureHelp(context.Background(), shim("pagestuff"), time.Second); got != "" {
+		t.Fatalf("shim with missing tool probed: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(marks, "pagestuff")); err == nil {
+		t.Fatal("shim with missing tool executed")
+	}
+	if got := captureHelp(context.Background(), shim("present"), time.Second); got != "Usage: present [options]" {
+		t.Fatalf("shim with installed tool: %q", got)
+	}
+	// Ordinary executables in the shim directory are unaffected.
+	plain := executable(t, shims, "plain", "echo 'Usage: plain [options]'")
+	if got := captureHelp(context.Background(), plain, time.Second); got != "Usage: plain [options]" {
+		t.Fatalf("plain: %q", got)
 	}
 }

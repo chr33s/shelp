@@ -70,12 +70,7 @@ func newRoot() *cobra.Command {
 		if jsonOutput {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(results)
 		}
-		for _, r := range results {
-			if _, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", r.Name, snippet(r.Help)); err != nil {
-				return err
-			}
-		}
-		return nil
+		return printResults(cmd.OutOrStdout(), results)
 	}}
 	search.Flags().IntVarP(&limit, "limit", "n", 10, "Maximum results (1–1000)")
 	search.Flags().BoolVar(&jsonOutput, "json", false, "Print structured results")
@@ -194,6 +189,45 @@ func printLines(w io.Writer, lines []string) error {
 	}
 	return nil
 }
+
+// printResults writes "name<TAB>description" lines. On a terminal the names
+// are padded into a column instead; pipes keep the documented tab format.
+func printResults(w io.Writer, results []index.Result) error {
+	width := 0
+	if f, ok := w.(*os.File); ok && terminal(f) {
+		for _, r := range results {
+			width = max(width, min(len(r.Name), 24))
+		}
+	}
+	for _, r := range results {
+		var err error
+		if width > 0 {
+			_, err = fmt.Fprintf(w, "%-*s  %s\n", width, r.Name, describe(r))
+		} else {
+			_, err = fmt.Fprintf(w, "%s\t%s\n", r.Name, describe(r))
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func terminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// describe prefers the one-line summary ("find – walk a file hierarchy" becomes
+// "walk a file hierarchy") over raw help, which for man pages starts with the
+// page header.
+func describe(r index.Result) string {
+	if r.Summary != "" {
+		return snippet(r.Summary)
+	}
+	return snippet(r.Help)
+}
+
 func snippet(help string) string {
 	text := strings.Join(strings.Fields(help), " ")
 	r := []rune(text)
