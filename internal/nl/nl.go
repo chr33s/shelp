@@ -124,7 +124,7 @@ func Suggest(ctx context.Context, query string, opts Options) ([]string, error) 
 		}
 		// Local models often fence code despite instructions; the content
 		// inside is still validated line by line.
-		lines, err = parse(stripFence(out))
+		lines, err = parse(stripFence(out), "Ollama")
 		if err != nil {
 			return nil, err
 		}
@@ -153,10 +153,10 @@ func fmSuggest(ctx context.Context, name, prompt string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fm on-device suggestions failed: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	return parse(out)
+	return parse(out, "fm")
 }
 
-func parse(out string) ([]string, error) {
+func parse(out, backend string) ([]string, error) {
 	var lines []string
 	seen := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -165,7 +165,7 @@ func parse(out string) ([]string, error) {
 			continue
 		}
 		if len(line) > 4096 || strings.HasPrefix(line, "```") || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "$ ") || strings.IndexFunc(line, unicode.IsControl) >= 0 {
-			return nil, fmt.Errorf("fm returned invalid command output")
+			return nil, fmt.Errorf("%s returned invalid command output", backend)
 		}
 		if !seen[line] {
 			lines = append(lines, line)
@@ -173,7 +173,7 @@ func parse(out string) ([]string, error) {
 		}
 	}
 	if len(lines) == 0 || len(lines) > 3 {
-		return nil, fmt.Errorf("fm must return 1–3 command lines, got %d", len(lines))
+		return nil, fmt.Errorf("%s must return 1–3 command lines, got %d", backend, len(lines))
 	}
 	return lines, nil
 }

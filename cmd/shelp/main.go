@@ -67,6 +67,9 @@ func newRoot() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if outdated, err := index.Outdated(cmd.Context(), dbPath); err == nil && outdated {
+			fmt.Fprintln(cmd.ErrOrStderr(), "shelp: index was built by an older shelp; run `shelp index` to refresh semantic matches")
+		}
 		if jsonOutput {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(results)
 		}

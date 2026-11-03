@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -207,7 +208,10 @@ func discover(ctx context.Context, pathEnv string, workers int) ([]command, erro
 		return nil, fmt.Errorf("PATH is empty; refusing to replace the index")
 	}
 	dirs := filepath.SplitList(pathEnv)
-	self := selfPath()
+	var self os.FileInfo
+	if exe, err := os.Executable(); err == nil {
+		self, _ = os.Stat(exe)
+	}
 	found := make([][]command, len(dirs))
 	errs := make([]error, len(dirs))
 	jobs := make(chan int, len(dirs))
@@ -254,7 +258,7 @@ func discover(ctx context.Context, pathEnv string, workers int) ([]command, erro
 						continue
 					}
 					// shelp's own help quotes example queries and would outrank real tools.
-					if e.Name() == "shelp" || (self != "" && resolved(bin) == self) {
+					if e.Name() == "shelp" || (self != nil && os.SameFile(info, self)) {
 						continue
 					}
 					found[i] = append(found[i], command{Name: e.Name(), Path: bin})
@@ -284,7 +288,8 @@ func discover(ctx context.Context, pathEnv string, workers int) ([]command, erro
 
 // manPages lists page names under every man*/ directory of `manpath`, which
 // honours MANPATH and PATH-relative man directories as man does. It returns
-// nil when the path is unavailable, and callers then ask man for every command.
+// nil when the path is unavailable or lists no pages (an empty or broken
+// MANPATH), and callers then ask man for every command.
 func manPages(ctx context.Context) map[string]bool {
 	mctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -318,23 +323,10 @@ func manPages(ctx context.Context) map[string]bool {
 			}
 		}
 	}
+	if len(pages) == 0 {
+		return nil
+	}
 	return pages
-}
-
-// selfPath is the resolved path of the running executable, or "" if unknown.
-func selfPath() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	return resolved(exe)
-}
-
-func resolved(path string) string {
-	if r, err := filepath.EvalSymlinks(path); err == nil {
-		return r
-	}
-	return path
 }
 
 var terminalEscape = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
@@ -409,7 +401,13 @@ func probeAllowed(bin string) bool {
 }
 
 // shimDirs holds macOS developer-tool shims: /usr/bin/git, make, pagestuff...
-var shimDirs = []string{"/usr/bin"}
+// Other systems have none, so their binaries are never read for the marker.
+var shimDirs = func() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"/usr/bin"}
+	}
+	return nil
+}()
 
 // xcodeShim reports an Apple developer-tool shim. Shims link libxcselect and
 // forward to the tool in the active Xcode or Command Line Tools; when that
@@ -494,19 +492,37 @@ func captureHelp(parent context.Context, bin string, timeout time.Duration) stri
 }
 
 // captureHelpIn creates probe sandboxes under root ("" means the system temp
-// dir). pages lists names with a man page; nil means unknown, so man is asked.
+// dir). pages lists names with a man page; nil means unknown, so man is asked
+// first. A listed miss is still asked after probing finds nothing, since man
+// also resolves pages the directory scan cannot see (cat pages, other paths).
 func captureHelpIn(parent context.Context, root string, pages map[string]bool, bin string, timeout time.Duration) string {
 	if parent.Err() != nil {
 		return ""
 	}
-	if name := filepath.Base(bin); pages == nil || pages[name] {
+	name := filepath.Base(bin)
+	man := func() string {
 		manCtx, manCancel := context.WithTimeout(parent, timeout)
+		defer manCancel()
 		out, _, err := process.Run(manCtx, 12<<10, "man", "-P", "cat", "--", name)
-		manCancel()
-		if text := bound(clean(out)); err == nil && text != "" {
+		if text := bound(clean(out)); err == nil {
 			return text
 		}
+		return ""
 	}
+	if pages == nil || pages[name] {
+		if text := man(); text != "" {
+			return text
+		}
+		return probeHelp(parent, root, bin, timeout)
+	}
+	if text := probeHelp(parent, root, bin, timeout); text != "" || parent.Err() != nil {
+		return text
+	}
+	return man()
+}
+
+// probeHelp runs bin with --help (and -h when advertised) in a sandbox.
+func probeHelp(parent context.Context, root, bin string, timeout time.Duration) string {
 	if parent.Err() != nil || !probeAllowed(bin) {
 		return ""
 	}

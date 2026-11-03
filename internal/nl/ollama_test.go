@@ -113,8 +113,8 @@ func TestOllamaBackend(t *testing.T) {
 	}
 	// Invalid model output is still rejected after unfencing.
 	reply = "Here are some options:\n1. find\n2. du\n3. ls\n4. fd"
-	if _, err = Suggest(context.Background(), "?find big files", opts); err == nil {
-		t.Fatal("accepted prose output")
+	if _, err = Suggest(context.Background(), "?find big files", opts); err == nil || !strings.Contains(err.Error(), "Ollama") {
+		t.Fatalf("prose output: %v", err)
 	}
 	opts.Model = "missing"
 	if _, err = Suggest(context.Background(), "?find large files", opts); err == nil || !strings.Contains(err.Error(), "ollama pull missing") {
@@ -123,5 +123,25 @@ func TestOllamaBackend(t *testing.T) {
 	opts.Model, opts.OllamaHost = "llama3.2", "http://127.0.0.1:1"
 	if _, err = Suggest(context.Background(), "?find large files", opts); err == nil || !strings.Contains(err.Error(), "ollama serve") {
 		t.Fatalf("unreachable: %v", err)
+	}
+}
+
+func TestOllamaDoesNotFollowRedirects(t *testing.T) {
+	path := indexedDB(t)
+	forwarded := false
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = true
+	}))
+	defer remote.Close()
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, remote.URL+"/api/chat", http.StatusTemporaryRedirect)
+	}))
+	defer local.Close()
+	opts := Options{DBPath: path, Backend: "ollama", Model: "llama3.2", OllamaHost: local.URL, Timeout: 5 * time.Second}
+	if _, err := Suggest(context.Background(), "?find large files", opts); err == nil {
+		t.Fatal("redirect response accepted")
+	}
+	if forwarded {
+		t.Fatal("prompt forwarded to the redirect target")
 	}
 }

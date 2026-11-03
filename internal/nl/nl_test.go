@@ -64,7 +64,7 @@ func TestSuggestionsContractCacheAndInvalidation(t *testing.T) {
 }
 func TestOutputAndExplicitTrigger(t *testing.T) {
 	for _, out := range []string{"", "```sh\nls\n```", "ls\ncat\ngit\nfind", "ls\x1b[31m", "# explanation"} {
-		if _, err := parse(out); err == nil {
+		if _, err := parse(out, "fm"); err == nil {
 			t.Fatalf("accepted %q", out)
 		}
 	}

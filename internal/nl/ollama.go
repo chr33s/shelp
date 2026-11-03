@@ -68,7 +68,12 @@ func ollamaChat(ctx context.Context, host, model, prompt string) (string, error)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// No proxy: a loopback request must not be routed through HTTP_PROXY.
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	// No redirects: a loopback listener could otherwise forward the prompt
+	// (with help excerpts) to a remote host.
+	client := &http.Client{
+		Transport:     &http.Transport{Proxy: nil},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {

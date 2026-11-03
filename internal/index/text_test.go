@@ -86,6 +86,11 @@ func TestRelevanceFixtures(t *testing.T) {
 		"git-lfs":  manPage("GIT-LFS(1)", "git-lfs", "Work with large files in Git repositories", "Git LFS is a system for managing and versioning large files."),
 		"textutil": manPage("TEXTUTIL(1)", "textutil", "text utility", "textutil can be used to manipulate text files of various formats, using the mechanisms provided by the Cocoa text system."),
 		"perldoc":  manPage("PERLDOC(1)", "perldoc", "Look up Perl documentation in Pod format", "perldoc looks up documentation in .pod format that is embedded in the perl installation tree or in a perl script."),
+		// Commands named after everyday words must not win on the name alone.
+		"file":  manPage("FILE(1)", "file", "determine file type", "file tests each argument and changes nothing; see the permissions of the file with ls."),
+		"chmod": manPage("CHMOD(1)", "chmod", "change file modes or Access Control Lists", "The chmod utility modifies the file mode bits (permissions) of the listed files."),
+		"make":  manPage("MAKE(1)", "make", "maintain program dependencies", "make changes into each directory given with -C directory and makes the targets in it."),
+		"mkdir": manPage("MKDIR(1)", "mkdir", "make directories", "The mkdir utility creates the directories named as operands."),
 	}
 	for name, help := range pages {
 		path := filepath.Join(dir, name+".txt")
@@ -111,6 +116,10 @@ func TestRelevanceFixtures(t *testing.T) {
 		"git":                     "git",
 		"gi":                      "git",
 		"zgrep":                   "zgrep",
+		"change file permissions": "chmod",
+		"make a directory":        "mkdir",
+		"determine file type":     "file",
+		"file":                    "file",
 	} {
 		results, err := Search(ctx, dbPath, query, 5)
 		if err != nil || len(results) == 0 || results[0].Name != want {
@@ -164,6 +173,10 @@ func TestSchemaV2UpgradesOnSearch(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].Name != "du" {
 		t.Fatalf("search after upgrade: %+v %v", results, err)
 	}
+	// Its terms and embeddings predate the current tokenizer until reindexed.
+	if outdated, err := Outdated(context.Background(), path); err != nil || !outdated {
+		t.Fatalf("migrated index must report outdated model: %v %v", outdated, err)
+	}
 	db, err = sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -209,6 +222,9 @@ func TestModelVersionForcesRetrain(t *testing.T) {
 	if err = db.QueryRow(`SELECT count(*) FROM terms`).Scan(&terms); err != nil || terms == 0 {
 		t.Fatalf("not retrained: %d %v", terms, err)
 	}
+	if outdated, err := Outdated(ctx, dbPath); err != nil || outdated {
+		t.Fatalf("retrained index reported outdated: %v %v", outdated, err)
+	}
 }
 
 func TestManPagesSkipsMissingLookups(t *testing.T) {
@@ -241,5 +257,20 @@ func TestManPagesSkipsMissingLookups(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(marks, "man")); err == nil {
 		t.Fatal("man spawned for a command without a page")
+	}
+	// man still gets the last word when the probe finds nothing: it resolves
+	// pages the directory scan misses, and sbin tools are never probed.
+	executable(t, dir, "man", `[ "$4" = sbintool ] && echo 'SBINTOOL(8) manual'`)
+	sbin := filepath.Join(t.TempDir(), "sbin")
+	if err := os.Mkdir(sbin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if got := captureHelpIn(context.Background(), "", pages, executable(t, sbin, "sbintool", "exit 1"), time.Second); got != "SBINTOOL(8) manual" {
+		t.Fatalf("man fallback after probe: %q", got)
+	}
+	// A MANPATH listing no pages is treated as unknown, not as "no pages".
+	t.Setenv("MANPATH", t.TempDir())
+	if got := manPages(context.Background()); got != nil {
+		t.Fatalf("empty man path must return nil: %v", got)
 	}
 }

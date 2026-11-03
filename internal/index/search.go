@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -44,7 +45,7 @@ func Search(ctx context.Context, path, query string, limit int) ([]Result, error
 	// Each content word becomes an FTS group with its agent-noun form, so
 	// "search" also matches grep's "file pattern searcher". Stop words such as
 	// "in" match nearly everything and are left to the name/embedding signals.
-	var groups []string
+	var words, groups []string
 	for _, t := range terms {
 		if embedding.StopWord(t) || len(t) < 2 {
 			continue
@@ -53,45 +54,45 @@ func Search(ctx context.Context, path, query string, limit int) ([]Result, error
 		if len(t) >= 4 && !strings.HasSuffix(strings.ToLower(t), "er") {
 			group = `("` + t + `" OR "` + strings.TrimSuffix(t, "s") + `er")`
 		}
+		words = append(words, t)
 		groups = append(groups, group)
 	}
-	if len(groups) > 0 {
+	// summaryHits[name] lists the groups matching name's one-line summary.
+	summaryHits := map[string][]int{}
+	if len(groups) == 1 {
+		ranked, err := ftsNames(ctx, tx, groups[0])
+		if err != nil {
+			return nil, err
+		}
+		for rank, m := range ranked {
+			keyword[m.name] = 30 / (1 + float64(rank)*0.1)
+		}
+	} else if len(groups) > 1 {
 		ranked, err := ftsNames(ctx, tx, strings.Join(groups, " OR "))
 		if err != nil {
 			return nil, err
 		}
 		// Documents covering more query words rank first; bm25 orders ties.
 		// Otherwise one rare word in a short help text beats all of them.
-		if len(groups) > 1 {
-			covered := map[string]int{}
-			for _, g := range groups {
-				names, err := ftsNames(ctx, tx, g)
-				if err != nil {
-					return nil, err
-				}
-				for _, name := range names {
-					covered[name]++
-				}
-			}
-			sort.SliceStable(ranked, func(i, j int) bool { return covered[ranked[i]] > covered[ranked[j]] })
-		}
-		for rank, name := range ranked {
-			keyword[name] = 30 / (1 + float64(rank)*0.1)
-		}
-		// The one-line summary says what a command does; matching query words
-		// there outweighs matches buried in option lists. Single words are
-		// usually name lookups ("git"), where it would lift git-lfs over git.
-		for _, g := range groups {
-			if len(groups) < 2 {
-				break
-			}
-			names, err := ftsNames(ctx, tx, "{summary} : "+g)
+		covered := map[string]int{}
+		for i, g := range groups {
+			matches, err := ftsNames(ctx, tx, g)
 			if err != nil {
 				return nil, err
 			}
-			for _, name := range names {
-				keyword[name] += 30 / float64(len(groups))
+			for _, m := range matches {
+				covered[m.name]++
+				if m.inSummary {
+					summaryHits[m.name] = append(summaryHits[m.name], i)
+				}
 			}
+		}
+		sort.SliceStable(ranked, func(i, j int) bool { return covered[ranked[i].name] > covered[ranked[j].name] })
+		for rank, m := range ranked {
+			// The one-line summary says what a command does; matching query
+			// words there outweighs matches buried in option lists. Single words
+			// are usually name lookups ("git"), where it would lift git-lfs over git.
+			keyword[m.name] = 30/(1+float64(rank)*0.1) + 30*float64(len(summaryHits[m.name]))/float64(len(groups))
 		}
 	}
 	model := embedding.Model{}
@@ -134,7 +135,10 @@ func Search(ctx context.Context, path, query string, limit int) ([]Result, error
 			grp = r.Name
 		}
 		group[r.Name] = grp
-		nameScore[r.Name] = max(lexical(r.Name, query), wordName(r.Name, terms))
+		nameScore[r.Name] = lexical(r.Name, query)
+		if len(terms) > 1 {
+			nameScore[r.Name] = max(nameScore[r.Name], wordName(r.Name, words, summaryHits[r.Name]))
+		}
 		r.Score = nameScore[r.Name] + keyword[r.Name]
 		if queryVector != nil && len(raw) > 0 {
 			v, err := embedding.Decode(raw)
@@ -200,40 +204,51 @@ func Search(ctx context.Context, path, query string, limit int) ([]Result, error
 	return result, tx.Commit()
 }
 
-func ftsNames(ctx context.Context, tx *sql.Tx, match string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT name FROM commands_fts WHERE commands_fts MATCH ? ORDER BY bm25(commands_fts,5,4,1),name`, match)
+type ftsMatch struct {
+	name string
+	// inSummary is set when a query phrase occurs in the summary column.
+	inSummary bool
+}
+
+func ftsNames(ctx context.Context, tx *sql.Tx, match string) ([]ftsMatch, error) {
+	// bm25 weighted on the summary column alone is non-zero only when a phrase
+	// occurs there, which avoids a separate "{summary} :" query per group.
+	rows, err := tx.QueryContext(ctx, `SELECT name,bm25(commands_fts,0,1,0) FROM commands_fts WHERE commands_fts MATCH ? ORDER BY bm25(commands_fts,5,4,1),name`, match)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var names []string
+	var matches []ftsMatch
 	for rows.Next() {
-		var name string
-		if err = rows.Scan(&name); err != nil {
+		var m ftsMatch
+		var summaryScore float64
+		if err = rows.Scan(&m.name, &summaryScore); err != nil {
 			return nil, err
 		}
-		names = append(names, name)
+		m.inSummary = summaryScore < 0
+		matches = append(matches, m)
 	}
-	return names, rows.Err()
+	return matches, rows.Err()
 }
 
-// wordName scores a name against individual words of a multi-word query:
+// wordName scores a name against the content words of a multi-word query:
 // "find large files" names find exactly, so find must not depend on help text
-// alone. A prefix counts only when it is most of the name ("print" for
-// printenv), not "text" for textutil or "search" for searchdiagnose.
-// Single-word queries are fully handled by lexical.
-func wordName(name string, words []string) float64 {
-	if len(words) < 2 {
-		return 0
-	}
+// alone. A name that is also an everyday word (file, make, test) counts fully
+// only when the command's summary matches another query word (otherwise the
+// FTS name column alone credits it), so "change file
+// permissions" does not lift file over chmod. A prefix counts only when it is
+// most of the name ("print" for printenv), not "text" for textutil.
+func wordName(name string, words []string, summaryHits []int) float64 {
 	name = strings.ToLower(name)
 	best := 0.0
-	for _, w := range words {
+	for i, w := range words {
 		w = strings.ToLower(w)
 		switch {
-		case len(w) < 2:
 		case name == w:
-			return 60
+			if len(words) == 1 || slices.ContainsFunc(summaryHits, func(j int) bool { return j != i }) {
+				return 60
+			}
+			// The FTS name column already credits the name; no extra boost.
 		case len(w) >= 3 && strings.HasPrefix(name, w) && 2*len(w) > len(name):
 			best = 20
 		}

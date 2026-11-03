@@ -25,4 +25,4 @@ run = "bash scripts/build-release.sh"
 
 [tasks.install]
 depends = ["build"]
-run = "cp bin/shelp ~/.local/bin"
+run = "mkdir -p ~/.local/bin && cp bin/shelp ~/.local/bin/shelp"

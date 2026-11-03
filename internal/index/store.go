@@ -157,6 +157,15 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		commands = append(commands, c)
 	}
 	rows.Close()
+	// Drop the old FTS index first so the row updates below do not re-index
+	// each row in a table that is rebuilt anyway.
+	if _, err = tx.ExecContext(ctx, `
+ DROP TRIGGER IF EXISTS commands_ai;
+ DROP TRIGGER IF EXISTS commands_ad;
+ DROP TRIGGER IF EXISTS commands_au;
+ DROP TABLE IF EXISTS commands_fts;`); err != nil {
+		return err
+	}
 	groups := aliasGroups(commands)
 	for _, c := range commands {
 		summary, _ := helpSummary(c.Help)
@@ -166,10 +175,6 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	// FTS triggers only fire when indexed columns change; grp updates skip them.
 	if _, err = tx.ExecContext(ctx, `
- DROP TRIGGER IF EXISTS commands_ai;
- DROP TRIGGER IF EXISTS commands_ad;
- DROP TRIGGER IF EXISTS commands_au;
- DROP TABLE IF EXISTS commands_fts;
  CREATE VIRTUAL TABLE commands_fts USING fts5(name,summary,body,content='commands',content_rowid='rowid',tokenize='porter unicode61');
  CREATE TRIGGER commands_ai AFTER INSERT ON commands BEGIN
  INSERT INTO commands_fts(rowid,name,summary,body) VALUES(new.rowid,new.name,new.summary,new.body); END;
@@ -183,6 +188,23 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// Outdated reports whether the index was built by a shelp with a different
+// tokenizer or document layout. Search still works (the schema is upgraded on
+// open), but semantic matches are weaker until `shelp index` retrains.
+func Outdated(ctx context.Context, path string) (bool, error) {
+	db, err := open(ctx, path, false)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	var stored string
+	err = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='model'`).Scan(&stored)
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	return stored != modelVersion, nil
 }
 
 // needsMigration reports whether a read-only open must upgrade the schema first.
